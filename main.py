@@ -13,7 +13,7 @@ def get_initial(float_bounds, integer_bounds, count=5):
 def update_mutation_rate(F, lower_f=0.1, upper_f=1.0, tau=0.1):
     rand2 = np.random.uniform(0.0, 1.0)
     if rand2 < tau:
-        return lower_f + (upper_f - lower_f)*np.random.uniform(0.0, 1.0)
+        return lower_f + (upper_f - lower_f) * np.random.uniform(0.0, 1.0)
     else:
         return F
 
@@ -21,7 +21,7 @@ def update_mutation_rate(F, lower_f=0.1, upper_f=1.0, tau=0.1):
 def update_crossover_rate(CR, lower_cr=0.1, upper_cr=1.0, tau=0.1):
     rand2 = np.random.uniform(0.0, 1.0)
     if rand2 < tau:
-        return lower_cr + (upper_cr - lower_cr)*np.random.uniform(0.0, 1.0)
+        return lower_cr + (upper_cr - lower_cr) * np.random.uniform(0.0, 1.0)
     else:
         return CR
 
@@ -51,7 +51,8 @@ def crossover_integer(mutated, target, CR=0.2, lower_cr=0.0, upper_cr=1.0):
     return np.where(mask, mutated, target)
 
 
-def client_update(obj_func, population, bounds, my_target, F=0.2, CR=0.2, lower_f=0.1, upper_f=1.0, lower_cr=0.1, upper_cr=1.0):
+def client_update(obj_func, population, bounds, my_target, F=0.2, CR=0.2, lower_f=0.1, upper_f=1.0, lower_cr=0.1,
+                  upper_cr=1.0):
     float_population, integer_population = population
     float_bounds, integer_bounds = bounds
     my_target_float, my_target_integer = my_target
@@ -65,12 +66,21 @@ def client_update(obj_func, population, bounds, my_target, F=0.2, CR=0.2, lower_
     return crossover_x_float, crossover_x_integer, new_obj, F, CR
 
 
-def rosenbrock(x):
+def rosenbrock(x, *args):
     return (1.0 - x[0]) ** 2 + 1000 * (x[1] - x[0] ** 2) ** 2
 
 
-def sphere(x, integer_x):
-    return x[0] ** 2 + x[1] ** 2 + np.abs((x[1] + x[0] + integer_x[0])**integer_x[0])
+def pnorm(x, integer_x):
+    return np.sum(x ** integer_x)
+
+
+def sphere(x, *args):
+    return np.sum(x ** 2)
+
+
+def griewank_function(x, integer_x):
+    """Griewank's function multimodal, symmetric, inseparable """
+    return np.abs(1 + (np.sum(x ** integer_x[0]) / 4000.0) - np.prod(np.cos(x) / np.sqrt(np.arange(len(x)) + 1)))
 
 
 def sort_pop_obj(obj, *args):
@@ -79,28 +89,33 @@ def sort_pop_obj(obj, *args):
 
 
 if __name__ == "__main__":
+    target_func = griewank_function
+
     with MPIPoolExecutor(root=0) as executor:
         if executor is not None:
-            float_bounds = [[-8, 8], [-8, 8]]
-            integer_bounds = [[-1, 2]]
-            
+            float_bounds = [[-600, 600]]*100
+            integer_bounds = [[2, 4]]
+
             pop_size = 128
-            
+
             population = get_initial(float_bounds, integer_bounds, count=pop_size)
             mutation_rate = np.random.uniform(0.5, 1.0, size=pop_size)
             crossover_rate = np.random.uniform(0.8, 1.0, size=pop_size)
-            chk_size = pop_size//MPI.COMM_WORLD.Get_size()
-            chk_size = 2**int(np.ceil(np.log2(chk_size)))
-            objective_f = np.stack(list(executor.map(sphere, *population, chunksize=chk_size)), axis=0)
+            chk_size = pop_size // MPI.COMM_WORLD.Get_size()
+            chk_size = 2 ** int(np.ceil(np.log2(chk_size)))
+            objective_f = np.stack(list(executor.map(target_func, *population, chunksize=chk_size)), axis=0)
             np.set_printoptions(precision=4)
-            objective_f, (mutation_rate, crossover_rate, *population) = sort_pop_obj(objective_f, mutation_rate, crossover_rate, *population)
+            objective_f, (mutation_rate, crossover_rate, *population) = sort_pop_obj(objective_f, mutation_rate,
+                                                                                     crossover_rate, *population)
             print("Initial x\t|\tInitial f", flush=True)
-            print(f"{population[0]}, {population[1]} | {objective_f[0]:.4e}", flush=True)
+            print(f"{population[0][0]}, {population[1][0]} | {objective_f[0]:.4e}", flush=True)
             print(flush=True)
             num_iterations = 200
             with tqdm.tqdm(range(num_iterations)) as tq_iter:
                 for iter_index in tq_iter:
-                    res = list(executor.map(client_update, [sphere]*pop_size, [population]*pop_size, [(float_bounds, integer_bounds)]*pop_size, list(zip(*population)), mutation_rate, crossover_rate, chunksize=chk_size))
+                    res = list(executor.map(client_update, [target_func] * pop_size, [population] * pop_size,
+                                            [(float_bounds, integer_bounds)] * pop_size, list(zip(*population)),
+                                            mutation_rate, crossover_rate, chunksize=chk_size))
 
                     new_x_float = np.stack([i[0] for i in res], axis=0)
                     new_x_integer = np.stack([i[1] for i in res], axis=0)
@@ -123,14 +138,16 @@ if __name__ == "__main__":
                     new_F[~mask] = mutation_rate[~mask]
                     new_CR[~mask] = crossover_rate[~mask]
 
-                    objective_f, (mutation_rate, crossover_rate, *population) = sort_pop_obj(objective_f, mutation_rate, crossover_rate, *population)
-                    new_obj, (new_F, new_CR, new_x_float, new_x_integer) = sort_pop_obj(new_obj, new_F, new_CR, new_x_float, new_x_integer)
+                    objective_f, (mutation_rate, crossover_rate, *population) = sort_pop_obj(objective_f, mutation_rate,
+                                                                                             crossover_rate,
+                                                                                             *population)
+                    new_obj, (new_F, new_CR, new_x_float, new_x_integer) = sort_pop_obj(new_obj, new_F, new_CR,
+                                                                                        new_x_float, new_x_integer)
 
-                    objective_f[pop_size//2:] = new_obj[:pop_size//2]
-                    population[0][pop_size//2:] = new_x_float[:pop_size//2]
-                    population[1][pop_size//2:] = new_x_integer[:pop_size//2]
+                    objective_f[pop_size // 2:] = new_obj[:pop_size // 2]
+                    population[0][pop_size // 2:] = new_x_float[:pop_size // 2]
+                    population[1][pop_size // 2:] = new_x_integer[:pop_size // 2]
 
-                    tq_iter.set_description(f"{objective_f[0]:.4e} | {prev_obj[0] - objective_f[0]:.4e} | {mutation_rate[0]:.4e}, {crossover_rate[0]:.4e} || {objective_f[-1]:.4e}")
-                    tq_iter.set_postfix(dict(float_vals = population[0][0], integer_vals = population[1][0]))
-
-
+                    tq_iter.set_description(
+                        f"{objective_f[0]:.4e} | {prev_obj[0] - objective_f[0]:.4e} | {mutation_rate[0]:.4e}, {crossover_rate[0]:.4e} || {objective_f[-1]:.4e}")
+                    tq_iter.set_postfix(dict(integer_vals=population[1][0]))
